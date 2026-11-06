@@ -87,12 +87,15 @@ public partial class MainWindow : Window
     }
     private MediaTile CreateTile(MediaItem item)
     {
-        var tile = new MediaTile(item);
+        var tile = new MediaTile(item, () => _tiles.Select(t => t.Item));
         tile.Selected += Select;
         tile.MetadataChanged += QueueLayout;
         tile.RemoveRequested += async t => await RemoveAsync(t);
         tile.RelocateRequested += async t => await RelocateAsync(t);
-        tile.SwapRequested += Swap;
+        tile.RepositionRequested += Reposition;
+        tile.LayoutDragEnded += () => { foreach (var t in _tiles) t.ClearDropPreview(); };
+        tile.VideoKeyDown += Window_KeyDown;
+        tile.ViewportChanged += t => { if (t == _selected) UpdateZoomControls(); };
         tile.FilesDropped += async files => await ImportAsync(files);
         _tiles.Add(tile); Stage.Children.Add(tile);
         EmptyState.Visibility = Visibility.Collapsed; CountText.Text = $"{_tiles.Count} / 9 画面";
@@ -133,7 +136,18 @@ public partial class MainWindow : Window
         FitBox.SelectedIndex = item?.Fit == FitMode.Cover ? 1 : 0;
         RatioButton.IsEnabled = _root != null && item != null && _root.ParentOf(item.Id) != null;
         _updatingControls = false;
+        UpdateZoomControls();
         UpdateTime();
+    }
+    private void UpdateZoomControls()
+    {
+        var tile = _selected;
+        var available = tile?.CanZoom == true;
+        var zoom = tile?.Item.Zoom ?? 1;
+        ZoomText.Text = available ? $"{tile!.EffectiveZoom * 100:0}%" : "—";
+        ZoomOutButton.IsEnabled = available && zoom > ViewportGeometry.MinimumZoom;
+        ZoomInButton.IsEnabled = available && zoom < ViewportGeometry.MaximumZoom;
+        ZoomResetButton.IsEnabled = available && (zoom != 1 || tile!.Item.PanX != 0 || tile.Item.PanY != 0);
     }
     private void UpdateTime()
     {
@@ -221,7 +235,7 @@ public partial class MainWindow : Window
     private void SetCustomMode() { _mode = LayoutMode.Custom; UpdateModeText(); }
     private void UpdateModeText()
     {
-        ModeText.Text = _mode switch { LayoutMode.Automatic => "完整显示 · 智能排列", LayoutMode.Grid => "均匀网格", LayoutMode.Focus => "主画面 60% · 可拖动调整", _ => "自定义比例 · 已锁定分区" };
+        ModeText.Text = _mode switch { LayoutMode.Automatic => "完整显示 · 智能排列", LayoutMode.Grid => "均匀网格", LayoutMode.Focus => "主画面 60% · 可拖动调整", _ => "自定义布局 · 已锁定分区" };
         foreach (var (button, mode) in new[] { (AutoButton, LayoutMode.Automatic), (GridButton, LayoutMode.Grid), (FocusButton, LayoutMode.Focus) })
             button.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(_mode == mode ? "#294E69" : "#252E3D"));
     }
@@ -233,10 +247,16 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == true && _root?.Walk().FirstOrDefault(x => x.Id == nodeId) is { } current)
         { _layoutCancellation?.Cancel(); current.Ratio = dialog.Ratio; SetCustomMode(); QueueLayout(); }
     }
-    internal void Swap(Guid a, Guid b)
+    internal void Reposition(Guid source, Guid target, TilePlacement placement)
     {
-        if (a == b || _root == null || !_tiles.Any(t => t.Item.Id == a) || !_tiles.Any(t => t.Item.Id == b)) return;
-        _layoutCancellation?.Cancel(); _root.Swap(a, b); SetCustomMode(); QueueLayout();
+        if (_closing || _mutation.CurrentCount == 0 || !_tiles.Any(t => t.Item.Id == source) || !_tiles.Any(t => t.Item.Id == target) ||
+            _root?.Reposition(source, target, placement) is not { } next) return;
+
+        _layoutCancellation?.Cancel();
+        _root = next;
+        SetCustomMode();
+        ApplyLayout(LayoutEngine.Evaluate(next, _tiles.Select(t => t.Item).ToArray(), Stage.ActualWidth, Stage.ActualHeight), true);
+        UpdateControls();
     }
     internal async Task RemoveAsync(MediaTile tile)
     {
@@ -340,10 +360,17 @@ public partial class MainWindow : Window
     private async void RestartAll_Click(object sender, RoutedEventArgs e) { foreach (var t in _tiles.ToArray()) if (t.Session != null) await t.Session.RestartAsync(); }
     private void Seek_Begin(object sender, MouseButtonEventArgs e) => _seeking = true;
     private async void Seek_End(object sender, MouseButtonEventArgs e) { await SeekSelectedAsync(); _seeking = false; }
-    private async void Seek_KeyUp(object sender, KeyEventArgs e) => await SeekSelectedAsync();
+    private async void Seek_KeyUp(object sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End or Key.PageUp or Key.PageDown)
+            await SeekSelectedAsync();
+    }
     private Task SeekSelectedAsync() => _selected?.Session is { } s ? s.SeekAsync((long)(SeekSlider.Value / 1000 * s.DurationMs)) : Task.CompletedTask;
     private void Rate_Changed(object sender, SelectionChangedEventArgs e) { if (!_updatingControls && _selected?.Session is { } s && RateBox.SelectedIndex >= 0) s.SetRate(Rates[RateBox.SelectedIndex]); }
     private void Fit_Changed(object sender, SelectionChangedEventArgs e) { if (!_updatingControls && _selected != null) { _selected.Item.Fit = FitBox.SelectedIndex == 1 ? FitMode.Cover : FitMode.Contain; _selected.ApplyFit(); QueueLayout(); } }
+    private void ZoomOut_Click(object sender, RoutedEventArgs e) => _selected?.ChangeZoom(-.25);
+    private void ZoomIn_Click(object sender, RoutedEventArgs e) => _selected?.ChangeZoom(.25);
+    private void ZoomReset_Click(object sender, RoutedEventArgs e) => _selected?.ResetZoom();
     private void Loop_Click(object sender, RoutedEventArgs e) { if (_selected != null) _selected.Item.Loop = LoopCheck.IsChecked == true; }
     private void Mute_Click(object sender, RoutedEventArgs e) => UpdateAudio();
     private void Volume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) { if (MuteCheck != null) UpdateAudio(); }
@@ -373,6 +400,15 @@ public partial class MainWindow : Window
         else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.O) { Add_Click(this, e); e.Handled = true; }
         else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.S) { Save_Click(this, e); e.Handled = true; }
         else if (e.Key == Key.Space && Keyboard.FocusedElement is not (TextBox or ComboBox or Slider or Button or CheckBox)) { Play_Click(this, e); e.Handled = true; }
+        else if ((e.Key is Key.Left or Key.Right) && (Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift) &&
+                 Keyboard.FocusedElement is not (TextBoxBase or ComboBox or Slider or MenuItem) &&
+                 _selected?.Session is { Ready: true, Error: null } session)
+        {
+            e.Handled = true;
+            if (e.IsRepeat) return;
+            var step = Keyboard.Modifiers == ModifierKeys.Shift ? 30_000L : 5_000L;
+            _ = session.SeekRelativeAsync(e.Key == Key.Left ? -step : step);
+        }
     }
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {

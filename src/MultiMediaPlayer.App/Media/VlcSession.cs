@@ -12,6 +12,7 @@ public sealed class VlcSession : IMediaSession
     private bool _starting, _startPaused;
     private bool _playRequested;
     private long _startPosition;
+    private (long Target, long RequestedAt)? _lastRelativeSeek;
     private bool _muted = true;
     private int _volume = 60;
     public MediaPlayer Player { get; }
@@ -46,6 +47,7 @@ public sealed class VlcSession : IMediaSession
     }
     public Task StartAsync(long position, bool paused) => Execute(() =>
     {
+        _lastRelativeSeek = null;
         _starting = true; Ready = false; _startPosition = position; _startPaused = paused; _playRequested = !paused;
         Player.Mute = true;
         if (!Player.Play()) { Error = "无法打开此视频。"; Changed?.Invoke(); }
@@ -127,6 +129,7 @@ public sealed class VlcSession : IMediaSession
         {
             await Execute(() =>
             {
+                _lastRelativeSeek = null;
                 if (Error != null) return;
                 if (_media.Statistics.DisplayedPictures == 0 && !_media.Tracks.Any(t => t.TrackType == TrackType.Video))
                 {
@@ -139,6 +142,7 @@ public sealed class VlcSession : IMediaSession
         });
     }
     private Task Execute(Action action) => ExecuteAsync(() => { action(); return Task.CompletedTask; });
+    private Task ExecuteOffThread(Action action) => ExecuteAsync(() => Task.Run(action));
     private async Task ExecuteAsync(Func<Task> action)
     {
         await _commands.WaitAsync().ConfigureAwait(false);
@@ -159,20 +163,39 @@ public sealed class VlcSession : IMediaSession
         if (_starting) _startPaused = true;
         else Player.SetPause(true);
     }));
-    public Task SeekAsync(long milliseconds) => Task.Run(() => Execute(() =>
+    public Task SeekAsync(long milliseconds) => ExecuteOffThread(() =>
+    {
+        _lastRelativeSeek = null;
+        Seek(milliseconds);
+    });
+    internal Task SeekRelativeAsync(long delta) => ExecuteOffThread(() =>
+    {
+        var duration = Player.Length;
+        if (!Ready || _starting || Error != null || duration <= 0 || !Player.IsSeekable) return;
+        var position = PositionMs;
+        var now = Environment.TickCount64;
+        if (_lastRelativeSeek is { } previous && now - previous.RequestedAt <= 500 &&
+            Math.Abs(position - previous.Target) > 300)
+            position = previous.Target;
+        var target = PlaybackPosition.Offset(position, delta, duration);
+        Seek(target);
+        _lastRelativeSeek = (target, now);
+    });
+    private void Seek(long milliseconds)
     {
         if (_starting) { _startPosition = milliseconds; return; }
         if (Player.State == VLCState.Ended) { _starting = true; _startPaused = true; _startPosition = milliseconds; Player.Stop(); Player.Play(); }
-        else if (Player.IsSeekable) Player.Time = Math.Clamp(milliseconds, 0, Math.Max(0, Player.Length - 1));
-    }));
-    public Task RestartAsync() => Task.Run(() => Execute(() =>
+        else if (Player.IsSeekable) Player.Time = PlaybackPosition.Offset(milliseconds, 0, Player.Length);
+    }
+    public Task RestartAsync() => ExecuteOffThread(() =>
     {
+        _lastRelativeSeek = null;
         _playRequested = true;
         if (_starting) { _startPaused = false; _startPosition = 0; return; }
         if (Player.State == VLCState.Ended) Player.Stop();
         else if (Player.IsSeekable) Player.Time = 0;
         Player.Play();
-    }));
+    });
     public void SetAudio(bool muted, int volume)
     {
         _muted = muted; _volume = volume;

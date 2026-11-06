@@ -11,6 +11,15 @@ public interface ILayoutEngine
 /// <summary>Bounded candidate search. Every automatic result competes against the best uniform grid.</summary>
 public sealed class LayoutEngine : ILayoutEngine
 {
+    public static TilePlacement DropPlacement(double x, double y)
+    {
+        var nearest = Math.Min(Math.Min(x, 1 - x), Math.Min(y, 1 - y));
+        if (nearest > .25) return TilePlacement.Center;
+        if (nearest == y) return TilePlacement.Above;
+        if (nearest == 1 - y) return TilePlacement.Below;
+        return nearest == x ? TilePlacement.Left : TilePlacement.Right;
+    }
+
     public static LayoutResult Evaluate(LayoutNode? root, IReadOnlyList<MediaItem> items, double width, double height)
     {
         var tiles = new Dictionary<Guid, Box>();

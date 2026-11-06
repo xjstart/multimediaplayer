@@ -43,6 +43,20 @@ internal static class Diagnostics
                 foreach (var mode in new[] { LayoutMode.Grid, LayoutMode.Focus, LayoutMode.Automatic })
                 { window.DiagnosticMode(mode); await Task.Delay(400); }
                 Require(handles.SequenceEqual(window.Tiles.Select(t => t.Session!.Player.NativeReference)), "Layout recreated a decoder."); checks.Add("layout changes preserve decoder instances");
+                var first = window.Tiles[0];
+                var target = window.Tiles[^1];
+                window.Reposition(first.Item.Id, target.Item.Id, TilePlacement.Above);
+                var split = window.CurrentLayout?.ParentOf(first.Item.Id);
+                Require(split?.Axis == SplitAxis.Vertical && split.First?.ItemId == first.Item.Id &&
+                    split.Second?.ItemId == target.Item.Id, "Directional move did not stack both videos.");
+                var beforeZoom = first.Session!.PositionMs;
+                first.ChangeZoom(.25);
+                first.Item.PanX = .5;
+                first.ChangeZoom(.25);
+                await Until(() => first.Session.PositionMs > beforeZoom + 100, "Video did not advance after zoom and pan.");
+                Require(first.EffectiveZoom == 1.5 && handles.SequenceEqual(window.Tiles.Select(t => t.Session!.Player.NativeReference)),
+                    "Layout or zoom replaced a player, or failed to apply the requested zoom.");
+                checks.Add("directional layout, zoom and pan preserve active players");
                 window.DiagnosticMute(false);
                 window.Select(window.Tiles[0]);
                 Require(window.Tiles.Count(t => !t.Session!.IsMuted) == 1, "More than one audio session is enabled.");
@@ -53,9 +67,17 @@ internal static class Diagnostics
                 await Until(() => window.Tiles.All(t => !t.Session!.IsPlaying), "Pause failed.");
                 await window.Tiles[0].Session!.SeekAsync(2000);
                 await Until(() => Math.Abs(window.Tiles[0].Session!.PositionMs - 2000) < 350, "Seek failed.");
+                var otherPosition = target.Session!.PositionMs;
+                await Task.WhenAll(first.Session.SeekRelativeAsync(5000), first.Session.SeekRelativeAsync(-5000),
+                    first.Session.SeekRelativeAsync(5000));
+                await Until(() => Math.Abs(first.Session.PositionMs - 7000) < 350, "Relative seeks did not accumulate.");
+                Require(!first.Session.IsPlaying && Math.Abs(target.Session.PositionMs - otherPosition) < 350,
+                    "Relative seek resumed playback or changed another video.");
+                await first.Session.SeekAsync(2000);
+                await Until(() => Math.Abs(first.Session.PositionMs - 2000) < 350, "Seek reset failed.");
                 window.Tiles[0].Session!.SetRate(1.5f);
-                checks.Add("pause, seek and playback rate");
-                window.Swap(window.Tiles[0].Item.Id, window.Tiles[^1].Item.Id);
+                checks.Add("pause, absolute and relative seek, and playback rate");
+                window.Reposition(window.Tiles[0].Item.Id, window.Tiles[^1].Item.Id, TilePlacement.Center);
                 window.DiagnosticRatio(.6); await Task.Delay(500);
                 var original = window.CurrentLayout!.Copy();
                 var work = output + ".mmp.json";
@@ -66,6 +88,8 @@ internal static class Diagnostics
                 Require(window.Tiles.All(t => !t.Session!.IsPlaying), "Workspace autoplayed.");
                 Require(Math.Abs(window.Tiles[0].Session!.PositionMs - 2000) < 500, "Saved seek position was not restored.");
                 Require(window.Tiles[0].Item.Rate == 1.5f, "Saved playback rate was not restored.");
+                Require(window.Tiles[0].Item.Zoom == 1.5 && window.Tiles[0].Item.PanX == .5 &&
+                    window.Tiles[0].EffectiveZoom == 1.5, "Saved zoom or pan was not restored.");
                 Require(window.CurrentLayout?.Ratio == original.Ratio && window.CurrentMode == LayoutMode.Custom, "Custom ratio was lost.");
                 checks.Add("workspace persists layout and reopens paused");
                 window.Width = 940; window.Height = 520; await Task.Delay(400);

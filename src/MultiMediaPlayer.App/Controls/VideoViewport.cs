@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using MultiMediaPlayer.Core;
 
 namespace MultiMediaPlayer.App.Controls;
 
@@ -9,6 +10,7 @@ internal sealed class VideoViewport : IDisposable
     private const uint VisibleWindow = 0x10000000;
     private const uint ClipChildren = 0x02000000;
     private const uint NoActivateOrZOrder = 0x0014;
+    private const int RenderLimit = 16_384;
     private readonly nint _parent;
     public nint Handle { get; private set; }
 
@@ -20,22 +22,16 @@ internal sealed class VideoViewport : IDisposable
         if (Handle == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     }
 
-    public void Resize(double aspect, bool cover)
+    public ViewportGeometry? Resize(MediaItem item)
     {
-        if (Handle == 0 || !GetClientRect(_parent, out var rect) || rect.Right < 1 || rect.Bottom < 1) return;
-        int width = rect.Right, height = rect.Bottom;
-        if (cover && double.IsFinite(aspect) && aspect > 0)
-        {
-            double w = Math.Max(width, height * aspect), h = Math.Max(height, width / aspect);
-            // D3D11 limits the render target; fall back to contain for pathological ratios.
-            if (w <= 16_384 && h <= 16_384)
-            {
-                width = (int)Math.Ceiling(w);
-                height = (int)Math.Ceiling(h);
-            }
-        }
-        SetWindowPos(Handle, 0, (rect.Right - width) / 2, (rect.Bottom - height) / 2,
-            width, height, NoActivateOrZOrder);
+        if (Handle == 0 || !GetClientRect(_parent, out var rect) || rect.Right < 1 || rect.Bottom < 1) return null;
+        var geometry = ViewportGeometry.Calculate(rect.Right, rect.Bottom, item, RenderLimit);
+        var content = geometry.Content;
+        // Keep the native surface over the entire viewport so VLC paints the letterbox bars.
+        SetWindowPos(Handle, 0, (int)Math.Round(Math.Min(0, content.X)), (int)Math.Round(Math.Min(0, content.Y)),
+            Math.Min(RenderLimit, Math.Max(rect.Right, (int)Math.Round(content.Width))),
+            Math.Min(RenderLimit, Math.Max(rect.Bottom, (int)Math.Round(content.Height))), NoActivateOrZOrder);
+        return geometry;
     }
 
     public void Dispose()

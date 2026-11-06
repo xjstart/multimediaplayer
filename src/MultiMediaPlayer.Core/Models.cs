@@ -4,6 +4,7 @@ public enum MediaKind { Video, Image }
 public enum FitMode { Contain, Cover }
 public enum LayoutMode { Automatic, Grid, Focus, Custom }
 public enum SplitAxis { Horizontal, Vertical } // Horizontal = side by side; Vertical = stacked.
+public enum TilePlacement { Center, Above, Below, Left, Right }
 
 public sealed class MediaItem
 {
@@ -16,6 +17,9 @@ public sealed class MediaItem
     public float Rate { get; set; } = 1;
     public long PositionMs { get; set; }
     public bool HardwareDecoding { get; set; } = true;
+    public double Zoom { get; set; } = 1;
+    public double PanX { get; set; }
+    public double PanY { get; set; }
     public MediaItem Copy() => (MediaItem)MemberwiseClone();
 }
 
@@ -57,11 +61,29 @@ public sealed class LayoutNode
         foreach (var n in Walk())
             if (n.ItemId == a) n.ItemId = b; else if (n.ItemId == b) n.ItemId = a;
     }
-    public void Insert(Guid target, Guid added, SplitAxis axis)
+    public LayoutNode? Reposition(Guid source, Guid target, TilePlacement placement)
+    {
+        if (source == target || !Enum.IsDefined(placement) ||
+            !Walk().Any(n => n.ItemId == source) || !Walk().Any(n => n.ItemId == target))
+            return null;
+
+        var root = Copy();
+        if (placement == TilePlacement.Center)
+        {
+            root.Swap(source, target);
+            return root;
+        }
+
+        root = Remove(root, source)!;
+        var axis = placement is TilePlacement.Left or TilePlacement.Right ? SplitAxis.Horizontal : SplitAxis.Vertical;
+        root.Insert(target, source, axis, placement is TilePlacement.Left or TilePlacement.Above);
+        return root;
+    }
+    public void Insert(Guid target, Guid added, SplitAxis axis, bool before = false)
     {
         var n = Walk().First(x => x.ItemId == target);
         n.ItemId = null; n.Axis = axis; n.Ratio = .5;
-        n.First = Leaf(target); n.Second = Leaf(added);
+        n.First = Leaf(before ? added : target); n.Second = Leaf(before ? target : added);
     }
 }
 

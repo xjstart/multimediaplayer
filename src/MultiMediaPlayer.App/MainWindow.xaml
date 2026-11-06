@@ -44,7 +44,7 @@
     <Grid x:Name="PlaybackControls">
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <Button x:Name="PlayButton" Content="▶ 播放" Click="Play_Click" Padding="12,5"/>
-     <Slider x:Name="SeekSlider" Grid.Column="1" Minimum="0" Maximum="1000" VerticalAlignment="Center" Margin="10,0" IsMoveToPointEnabled="True" PreviewMouseLeftButtonDown="Seek_Begin" PreviewMouseLeftButtonUp="Seek_End" PreviewKeyUp="Seek_KeyUp"/>
+     <Slider x:Name="SeekSlider" Grid.Column="1" Minimum="0" Maximum="1000" VerticalAlignment="Center" Margin="10,0" IsMoveToPointEnabled="True" PreviewMouseLeftButtonDown="Seek_Begin" PreviewMouseLeftButtonUp="Seek_End" PreviewKeyUp="Seek_KeyUp" ToolTip="在画面中按 ← / → 跳转 5 秒，按住 Shift 跳转 30 秒"/>
      <TextBlock x:Name="TimeText" Grid.Column="2" Text="00:00 / 00:00" VerticalAlignment="Center" HorizontalAlignment="Center" FontSize="12" Foreground="#91A5C2"/>
      <StackPanel Grid.Column="3" Orientation="Horizontal">
       <ComboBox x:Name="RateBox" Width="76" SelectionChanged="Rate_Changed" ToolTip="播放速度"><ComboBoxItem Content="0.25×"/><ComboBoxItem Content="0.5×"/><ComboBoxItem Content="1×"/><ComboBoxItem Content="1.5×"/><ComboBoxItem Content="2×"/><ComboBoxItem Content="4×"/></ComboBox>
@@ -56,10 +56,16 @@
     <WrapPanel Margin="3,5,0,0">
      <TextBlock Text="画面" Foreground="#7F93AF" VerticalAlignment="Center" Margin="5,0"/>
      <ComboBox x:Name="FitBox" Width="128" SelectionChanged="Fit_Changed"><ComboBoxItem Content="完整显示"/><ComboBoxItem Content="居中裁切铺满"/></ComboBox>
+     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" ToolTip="Ctrl + 滚轮缩放 · 放大后拖动查看">
+      <Button x:Name="ZoomOutButton" Content="−" Padding="8,4" Click="ZoomOut_Click" IsEnabled="False" AutomationProperties.Name="缩小画面"/>
+      <TextBlock x:Name="ZoomText" Text="—" Width="45" TextAlignment="Center" VerticalAlignment="Center" Foreground="#A6B5CB"/>
+      <Button x:Name="ZoomInButton" Content="+" Padding="8,4" Click="ZoomIn_Click" IsEnabled="False" AutomationProperties.Name="放大画面"/>
+      <Button x:Name="ZoomResetButton" Content="重置" Padding="8,4" Click="ZoomReset_Click" IsEnabled="False" AutomationProperties.Name="重置画面缩放"/>
+     </StackPanel>
      <CheckBox x:Name="HardwareCheck" Content="硬件解码" Click="Hardware_Click" ToolTip="切换后保留位置并重新载入当前视频"/>
      <Button x:Name="RelocateButton" Content="重新定位…" Padding="10,4" Click="Relocate_Click"/>
      <Button x:Name="RemoveButton" Content="移除画面" Padding="10,4" Click="Remove_Click"/>
-     <TextBlock Text="拖动标题交换画面 · 拖动分隔线调整比例" Foreground="#617794" VerticalAlignment="Center" Margin="18,0,0,0" FontSize="11"/>
+     <TextBlock Text="拖标题到边缘分区、到中央交换 · 拖分隔线调比例" Foreground="#617794" VerticalAlignment="Center" Margin="18,0,0,0" FontSize="11"/>
     </WrapPanel>
    </StackPanel>
   </Border>

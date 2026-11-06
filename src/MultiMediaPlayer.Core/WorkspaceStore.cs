@@ -34,6 +34,9 @@ public static class WorkspaceStore
                 throw new InvalidDataException("只支持本地媒体文件。");
             if (!Enum.IsDefined(i.Kind) || !Enum.IsDefined(i.Fit)) throw new InvalidDataException("媒体设置无效。");
             i.DisplayAspect = LayoutEngine.SafeAspect(i.DisplayAspect);
+            i.Zoom = ViewportGeometry.ClampZoom(i.Zoom);
+            i.PanX = ViewportGeometry.ClampPan(i.PanX);
+            i.PanY = ViewportGeometry.ClampPan(i.PanY);
             i.Rate = float.IsFinite(i.Rate) ? Math.Clamp(i.Rate, .25f, 4f) : 1;
             i.PositionMs = Math.Max(0, i.PositionMs);
         }
