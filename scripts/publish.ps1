@@ -32,7 +32,7 @@ try {
             if (Test-Path -LiteralPath $file) { Copy-Item $file (Join-Path $licenses "$pack-$name") -Force }
         }
     }
-    foreach ($relative in 'MultiMediaPlayer.exe', 'coreclr.dll', 'PresentationFramework.dll', 'libSkiaSharp.dll', 'libvlc\win-x64\libvlc.dll', 'libvlc\win-x64\plugins') {
+    foreach ($relative in 'MultiMediaPlayer.exe', 'coreclr.dll', 'PresentationFramework.dll', 'libSkiaSharp.dll', 'libvlc\win-x64\libvlc.dll', 'libvlc\win-x64\plugins\audio_output\libdirectsound_plugin.dll') {
         if (-not (Test-Path -LiteralPath (Join-Path $target $relative))) { throw "Missing published dependency: $relative" }
     }
     & tar.exe -a -cf $archive -C (Split-Path -Parent $target) (Split-Path -Leaf $target)

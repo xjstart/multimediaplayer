@@ -5,26 +5,28 @@ namespace MultiMediaPlayer.Core;
 
 public static class WorkspaceStore
 {
+    public const int MaximumBytes = 2 * 1024 * 1024;
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() }, MaxDepth = 32 };
     public static async Task SaveAsync(string path, Workspace workspace)
     {
         Validate(workspace);
+        workspace.Version = 2;
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(workspace, Options);
+        if (bytes.Length > MaximumBytes) throw new InvalidDataException("工作区超过 2 MiB，请减少图片集条目后再保存。");
         var temporary = path + ".tmp";
-        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(workspace, Options));
+        await File.WriteAllBytesAsync(temporary, bytes);
         File.Move(temporary, path, true);
     }
     public static async Task<Workspace> LoadAsync(string path)
     {
-        if (new FileInfo(path).Length > 2 * 1024 * 1024) throw new InvalidDataException("工作区文件过大。");
+        if (new FileInfo(path).Length > MaximumBytes) throw new InvalidDataException("工作区文件过大。");
         var w = JsonSerializer.Deserialize<Workspace>(await File.ReadAllTextAsync(path), Options) ?? throw new InvalidDataException("工作区为空。");
-        Validate(w);
-        foreach (var i in w.Items)
-            i.Path = Path.GetFullPath(i.Path, Path.GetDirectoryName(Path.GetFullPath(path))!);
+        Validate(w, Path.GetDirectoryName(Path.GetFullPath(path))!);
         return w;
     }
-    public static void Validate(Workspace w)
+    public static void Validate(Workspace w, string? baseDirectory = null)
     {
-        if (w.Version != 1) throw new InvalidDataException("不支持此工作区版本。");
+        if (w.Version is not (1 or 2)) throw new InvalidDataException("不支持此工作区版本。");
         if (w.Items == null || w.Items.Count > 9 || w.Items.Any(i => i == null)) throw new InvalidDataException("工作区最多支持九个画面。");
         var ids = w.Items.Select(i => i.Id).ToHashSet();
         if (ids.Count != w.Items.Count || ids.Contains(Guid.Empty)) throw new InvalidDataException("媒体标识重复或无效。");
@@ -33,6 +35,17 @@ public static class WorkspaceStore
             if (string.IsNullOrWhiteSpace(i.Path) || Uri.TryCreate(i.Path, UriKind.Absolute, out var uri) && !uri.IsFile)
                 throw new InvalidDataException("只支持本地媒体文件。");
             if (!Enum.IsDefined(i.Kind) || !Enum.IsDefined(i.Fit)) throw new InvalidDataException("媒体设置无效。");
+            i.Path = ImageSequence.Normalize(i.Path, baseDirectory);
+            if (i.ImageCollectionPaths is { } images)
+            {
+                images = ImageSequence.Distinct(images, baseDirectory);
+                if (i.Kind != MediaKind.Image || images.Count == 0 ||
+                    images.Any(p => string.IsNullOrWhiteSpace(p) || !MediaFiles.Images.Contains(Path.GetExtension(p)) ||
+                        Uri.TryCreate(p, UriKind.Absolute, out var imageUri) && !imageUri.IsFile) ||
+                    !images.Contains(i.Path, ImageSequence.PathComparer))
+                    throw new InvalidDataException("图片集必须包含当前图片，且只能包含本地支持的图片。");
+                i.ImageCollectionPaths = images.Distinct(ImageSequence.PathComparer).ToList();
+            }
             i.DisplayAspect = LayoutEngine.SafeAspect(i.DisplayAspect);
             i.Zoom = ViewportGeometry.ClampZoom(i.Zoom);
             i.PanX = ViewportGeometry.ClampPan(i.PanX);

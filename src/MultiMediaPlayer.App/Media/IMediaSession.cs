@@ -9,4 +9,7 @@ public interface IMediaSession : IAsyncDisposable
     Task PauseAsync();
     Task SeekAsync(long milliseconds);
     void SetAudio(bool muted, int volume);
+    void SetAudioOutputAvailable(bool available);
+    AudioSnapshot GetAudioSnapshot();
+    Task RebindDefaultAudioDeviceAsync(CancellationToken cancellationToken = default);
 }

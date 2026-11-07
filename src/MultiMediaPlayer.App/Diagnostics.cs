@@ -7,7 +7,7 @@ using MultiMediaPlayer.Core;
 namespace MultiMediaPlayer.App;
 
 /// <summary>Opt-in test harness. Uses the production WPF views and native decoders, never user media discovery.</summary>
-internal static class Diagnostics
+internal static partial class Diagnostics
 {
     private static async Task Until(Func<bool> test, string reason, int timeoutSeconds = 20)
     {
@@ -59,9 +59,10 @@ internal static class Diagnostics
                 checks.Add("directional layout, zoom and pan preserve active players");
                 window.DiagnosticMute(false);
                 window.Select(window.Tiles[0]);
-                Require(window.Tiles.Count(t => !t.Session!.IsMuted) == 1, "More than one audio session is enabled.");
+                Require(window.Tiles.Count(t => t.Session!.GetAudioSnapshot().NativeMuted == false) == 1, "More than one native audio output is enabled.");
                 window.Select(window.Tiles[^1]);
-                Require(window.Tiles[^1].Session!.IsMuted == false && window.Tiles.Take(count - 1).All(t => t.Session!.IsMuted), "Audio focus did not switch.");
+                Require(window.Tiles[^1].Session!.GetAudioSnapshot().NativeMuted == false &&
+                    window.Tiles.Take(count - 1).All(t => t.Session!.GetAudioSnapshot().NativeMuted != false), "Native audio focus did not switch.");
                 window.DiagnosticMute(true); checks.Add("exclusive audio focus and global mute");
                 foreach (var t in window.Tiles) await t.Session!.PauseAsync();
                 await Until(() => window.Tiles.All(t => !t.Session!.IsPlaying), "Pause failed.");

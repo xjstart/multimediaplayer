@@ -20,7 +20,13 @@ public sealed class MediaItem
     public double Zoom { get; set; } = 1;
     public double PanX { get; set; }
     public double PanY { get; set; }
-    public MediaItem Copy() => (MediaItem)MemberwiseClone();
+    public List<string>? ImageCollectionPaths { get; set; }
+    public MediaItem Copy()
+    {
+        var copy = (MediaItem)MemberwiseClone();
+        copy.ImageCollectionPaths = ImageCollectionPaths?.ToList();
+        return copy;
+    }
 }
 
 public readonly record struct Box(double X, double Y, double Width, double Height)
@@ -89,7 +95,7 @@ public sealed class LayoutNode
 
 public sealed class Workspace
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public List<MediaItem> Items { get; set; } = [];
     public LayoutMode Mode { get; set; }
     public LayoutNode? Layout { get; set; }

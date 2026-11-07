@@ -106,7 +106,7 @@ try
     await File.WriteAllTextAsync(path, """{"Version":1,"Items":[{"Path":"old.mp4"}]}""");
     var legacy = (await WorkspaceStore.LoadAsync(path)).Items.Single();
     Check(legacy.Zoom == 1 && legacy.PanX == 0 && legacy.PanY == 0, "Legacy workspace should start at centered 100%.");
-    foreach (var json in new[] { "{\"Version\":2}", "{\"Items\":null}", "{\"Mode\":\"Custom\",\"Items\":[{\"Path\":\"C:\\\\a.mp4\"}]}", "{\"Items\":[{\"Path\":\"https://example.com/x.mp4\"}]}" })
+    foreach (var json in new[] { "{\"Version\":3}", "{\"Items\":null}", "{\"Mode\":\"Custom\",\"Items\":[{\"Path\":\"C:\\\\a.mp4\"}]}", "{\"Items\":[{\"Path\":\"https://example.com/x.mp4\"}]}" })
     {
         await File.WriteAllTextAsync(path, json);
         bool rejected = false; try { await WorkspaceStore.LoadAsync(path); } catch (Exception ex) when (ex is InvalidDataException or JsonException) { rejected = true; }
@@ -117,4 +117,5 @@ try
     Check(invalidRatio, "Nonfinite ratio accepted.");
 }
 finally { File.Delete(path); }
+await ImageSequenceTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} assertions; 180 layout scenarios; median {times.Order().ElementAt(times.Count / 2):0.0} ms; max {times.Max():0.0} ms.");

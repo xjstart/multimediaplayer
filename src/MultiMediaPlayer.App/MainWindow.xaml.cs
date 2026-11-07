@@ -9,12 +9,17 @@ using System.Windows.Threading;
 using LibVLCSharp.Shared;
 using Microsoft.Win32;
 using MultiMediaPlayer.App.Controls;
+using MultiMediaPlayer.App.Media;
 using MultiMediaPlayer.Core;
 
 namespace MultiMediaPlayer.App;
 public partial class MainWindow : Window
 {
     private readonly LibVLC _engine;
+    private readonly DefaultAudioDeviceMonitor _audioDevices;
+    private CancellationTokenSource? _audioRecoveryCancellation;
+    private Task _audioRecoveryTask = Task.CompletedTask;
+    private bool _audioOutputAvailable = true, _recoveringAudio;
     private readonly List<MediaTile> _tiles = [];
     private readonly LayoutEngine _layoutEngine = new();
     private readonly List<Thumb> _splitters = [];
@@ -28,6 +33,8 @@ public partial class MainWindow : Window
     private WindowState _previousWindowState;
     private string? _workspacePath;
     private Guid? _focusItem;
+    private long _imageContentRevision;
+    private bool _managingImages;
     private static readonly float[] Rates = [.25f, .5f, 1f, 1.5f, 2f, 4f];
     public MainWindow()
     {
@@ -35,11 +42,23 @@ public partial class MainWindow : Window
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
         LibVLCSharp.Shared.Core.Initialize();
-        _engine = new LibVLC("--ignore-config", "--no-video-title-show", "--no-snapshot-preview", "--no-osd", "--quiet");
+        _engine = VlcEngine.Create();
+        _audioDevices = new();
+        _audioOutputAvailable = _audioDevices.Current.Available;
+        _audioDevices.Changed += state => Dispatcher.BeginInvoke(() =>
+        {
+            if (!_closing) _audioRecoveryTask = RecoverAudioDeviceAsync(state);
+        });
         _timer.Tick += (_, _) => UpdateTime(); _timer.Start();
+        Activated += async (_, _) =>
+        {
+            if (!_closing && _mutation.CurrentCount > 0)
+                await Task.WhenAll(_tiles.Select(t => t.Browser?.RefreshAsync() ?? Task.CompletedTask));
+        };
         Loaded += async (_, _) =>
         {
             UpdateModeText(); UpdateControls();
+            if (App.Arguments.Contains("--verify-image-navigation")) { await Diagnostics.VerifyImageNavigationAsync(this, App.Arguments); return; }
             if (App.Arguments.Contains("--verify-workspace")) { await Diagnostics.VerifyWorkspaceAsync(this, App.Arguments); return; }
             if (App.Arguments.Contains("--verify-images")) { await Diagnostics.VerifyImagesAsync(this, App.Arguments); return; }
             if (App.Arguments.Contains("--soak") || App.Arguments.Contains("--smoke")) { await Diagnostics.RunAsync(this, App.Arguments); return; }
@@ -53,6 +72,7 @@ public partial class MainWindow : Window
     internal LayoutMode CurrentMode => _mode;
     internal void DiagnosticMode(LayoutMode mode) => SetMode(mode);
     internal void DiagnosticMute(bool mute) { MuteCheck.IsChecked = mute; UpdateAudio(); }
+    internal void DiagnosticVolume(int volume) { VolumeSlider.Value = volume; UpdateAudio(); }
     internal void DiagnosticRatio(double ratio) { if (_root != null && !_root.IsLeaf) { _root.Ratio = ratio; SetCustomMode(); QueueLayout(); } }
     internal async Task ImportAsync(IEnumerable<string> paths, bool paused = false)
     {
@@ -78,7 +98,7 @@ public partial class MainWindow : Window
                 added.Add(tile); Select(tile);
             }
             PlaceNewTiles();
-            foreach (var tile in added) await tile.LoadAsync(_engine, paused);
+            foreach (var tile in added) await tile.LoadAsync(_engine, paused, _audioOutputAvailable);
             UpdateAudio(); UpdateControls();
             QueueLayout();
             Status(rejected.Length > 0 ? $"已添加 {valid.Length} 个；不支持或不存在：{string.Join("、", rejected.Select(Path.GetFileName))}" : $"已添加 {valid.Length} 个媒体 · 点击视频切换声音");
@@ -90,12 +110,22 @@ public partial class MainWindow : Window
         var tile = new MediaTile(item, () => _tiles.Select(t => t.Item));
         tile.Selected += Select;
         tile.MetadataChanged += QueueLayout;
+        tile.ImageContentChanged += _ =>
+        {
+            _imageContentRevision++;
+            // Preserve an outstanding import/resize/layout action, recalculating from current aspects.
+            if (_layoutCancellation != null) QueueLayout();
+            UpdateControls();
+        };
+        tile.ManageImagesRequested += async t => await ManageImagesAsync(t);
+        tile.Notice += Status;
         tile.RemoveRequested += async t => await RemoveAsync(t);
         tile.RelocateRequested += async t => await RelocateAsync(t);
         tile.RepositionRequested += Reposition;
         tile.LayoutDragEnded += () => { foreach (var t in _tiles) t.ClearDropPreview(); };
         tile.VideoKeyDown += Window_KeyDown;
         tile.ViewportChanged += t => { if (t == _selected) UpdateZoomControls(); };
+        tile.AudioStatusChanged += t => { if (t == _selected) UpdateAudioStatus(); };
         tile.FilesDropped += async files => await ImportAsync(files);
         _tiles.Add(tile); Stage.Children.Add(tile);
         EmptyState.Visibility = Visibility.Collapsed; CountText.Text = $"{_tiles.Count} / 9 画面";
@@ -111,6 +141,7 @@ public partial class MainWindow : Window
     }
     internal void Select(MediaTile tile)
     {
+        if (_closing || !_tiles.Contains(tile)) return;
         // Two passes guarantee old audio is muted before new audio is enabled.
         foreach (var t in _tiles) t.Session?.SetAudio(true, (int)VolumeSlider.Value);
         _selected = tile;
@@ -120,7 +151,45 @@ public partial class MainWindow : Window
     private void UpdateAudio()
     {
         foreach (var t in _tiles.Where(t => t != _selected)) t.Session?.SetAudio(true, (int)VolumeSlider.Value);
-        _selected?.Session?.SetAudio(MuteCheck.IsChecked == true, (int)VolumeSlider.Value);
+        foreach (var t in _tiles) t.Session?.SetAudioOutputAvailable(_audioOutputAvailable);
+        _selected?.Session?.SetAudio(MuteCheck.IsChecked == true || !_audioOutputAvailable || _recoveringAudio, (int)VolumeSlider.Value);
+        UpdateAudioStatus();
+    }
+    private void UpdateAudioStatus()
+    {
+        if (_closing) return;
+        if (!_audioOutputAvailable) Status(_audioDevices.Current.Error ?? "等待音频输出设备 · 视频可继续播放");
+        else if (_selected?.Session?.GetAudioSnapshot().Error is { } error) Status(error);
+    }
+    internal async Task RecoverAudioDeviceAsync(AudioDeviceState state)
+    {
+        if (_closing) return;
+        _audioRecoveryCancellation?.Cancel();
+        var cancellation = _audioRecoveryCancellation = new();
+        var token = cancellation.Token;
+        _audioOutputAvailable = state.Available;
+        _recoveringAudio = true; UpdateAudio();
+        try
+        {
+            if (!state.Available) return;
+            await _mutation.WaitAsync(token);
+            try
+            {
+                if (_closing) return;
+                await Task.WhenAll(_tiles.Select(t => t.Session).OfType<VlcSession>()
+                    .Select(s => s.RebindDefaultAudioDeviceAsync(token)));
+            }
+            finally { _mutation.Release(); }
+            if (!token.IsCancellationRequested) Status("音频输出设备已恢复 · 声音跟随当前选中画面");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log.Write(ex.ToString()); Status("音频设备恢复失败：" + ex.Message); }
+        finally
+        {
+            if (ReferenceEquals(_audioRecoveryCancellation, cancellation))
+            { _audioRecoveryCancellation = null; _recoveringAudio = false; if (!_closing) UpdateAudio(); }
+            cancellation.Dispose();
+        }
     }
     private void UpdateControls()
     {
@@ -170,11 +239,13 @@ public partial class MainWindow : Window
         {
             await Task.Delay(100, token);
             var items = _tiles.Select(t => t.Item.Copy()).ToArray();
+            long contentRevision = _imageContentRevision;
             var previous = _root?.Copy(); var mode = _mode; var focus = _focusItem;
             var width = Stage.ActualWidth; var height = Stage.ActualHeight;
             if (width < 1 || height < 1) return;
             var layout = await Task.Run(() => _layoutEngine.Arrange(items, width, height, mode, previous, focus, token), token);
             if (token.IsCancellationRequested || _closing) return;
+            if (contentRevision != _imageContentRevision) { QueueLayout(); return; }
             _root = layout.Root; ApplyLayout(layout, true); UpdateControls();
         }
         catch (OperationCanceledException) { }
@@ -278,10 +349,32 @@ public partial class MainWindow : Window
     {
         var dialog = MediaDialog(false); if (dialog.ShowDialog(this) != true) return;
         if (!MediaFiles.Supported(dialog.FileName)) { Status("不支持此文件类型。"); return; }
-        tile.Item.Path = dialog.FileName; tile.Item.Kind = MediaFiles.Kind(dialog.FileName); tile.Item.PositionMs = 0;
-        await ReplaceTileAsync(tile, true);
+        if (!_tiles.Contains(tile) || _closing) return;
+        if (tile.Browser != null && MediaFiles.Kind(dialog.FileName) == MediaKind.Image)
+        {
+            if (await tile.Browser.RelocateAsync(dialog.FileName)) await tile.Browser.RefreshAsync();
+            return;
+        }
+        var relocated = tile.Item.Copy();
+        relocated.ImageCollectionPaths = null;
+        relocated.Path = dialog.FileName; relocated.Kind = MediaFiles.Kind(dialog.FileName); relocated.PositionMs = 0;
+        relocated.Zoom = 1; relocated.PanX = relocated.PanY = 0;
+        await ReplaceTileAsync(tile, true, relocated);
     }
-    private async Task ReplaceTileAsync(MediaTile tile, bool paused)
+    private async Task ManageImagesAsync(MediaTile tile)
+    {
+        if (_managingImages || _closing || tile.Browser == null || _mutation.CurrentCount == 0) return;
+        _managingImages = true;
+        try
+        {
+            Select(tile);
+            await tile.Browser.RefreshAsync();
+            await tile.Browser.WhenIdleAsync();
+            if (!_closing && _tiles.Contains(tile)) new ImageCollectionDialog(tile.Item, tile.Browser) { Owner = this }.ShowDialog();
+        }
+        finally { _managingImages = false; }
+    }
+    internal async Task ReplaceTileAsync(MediaTile tile, bool paused, MediaItem? item = null)
     {
         await _mutation.WaitAsync();
         try
@@ -289,8 +382,8 @@ public partial class MainWindow : Window
             var index = _tiles.IndexOf(tile); var wasSelected = _selected == tile;
             if (index < 0) return;
             _tiles.Remove(tile); await tile.ReleaseAsync(); Stage.Children.Remove(tile);
-            var replacement = CreateTile(tile.Item); _tiles.Remove(replacement); _tiles.Insert(index, replacement);
-            await replacement.LoadAsync(_engine, paused);
+            var replacement = CreateTile(item ?? tile.Item); _tiles.Remove(replacement); _tiles.Insert(index, replacement);
+            await replacement.LoadAsync(_engine, paused, _audioOutputAvailable);
             if (wasSelected) Select(replacement); else UpdateAudio();
             QueueLayout();
         }
@@ -320,7 +413,7 @@ public partial class MainWindow : Window
             VolumeSlider.Value = workspace.Volume; MuteCheck.IsChecked = workspace.Muted;
             foreach (var item in workspace.Items) CreateTile(item);
             PlaceNewTiles();
-            foreach (var tile in _tiles) await tile.LoadAsync(_engine, true);
+            foreach (var tile in _tiles) await tile.LoadAsync(_engine, true, _audioOutputAvailable);
             var selected = _tiles.FirstOrDefault(t => t.Item.Id == workspace.SelectedId) ?? _tiles.FirstOrDefault();
             if (selected != null) Select(selected);
             _workspacePath = path; EmptyState.Visibility = _tiles.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -395,11 +488,19 @@ public partial class MainWindow : Window
     }
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Handled || _closing) return;
         if (e.Key == Key.F11) { ToggleFullscreen(); e.Handled = true; }
         else if (e.Key == Key.Escape && _fullscreen) { ToggleFullscreen(); e.Handled = true; }
         else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.O) { Add_Click(this, e); e.Handled = true; }
         else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.S) { Save_Click(this, e); e.Handled = true; }
         else if (e.Key == Key.Space && Keyboard.FocusedElement is not (TextBox or ComboBox or Slider or Button or CheckBox)) { Play_Click(this, e); e.Handled = true; }
+        else if ((e.Key is Key.Left or Key.Right) && Keyboard.Modifiers == ModifierKeys.None &&
+                 !MediaTile.IsInteractiveInput(Keyboard.FocusedElement as DependencyObject) &&
+                 _selected?.Browser is { } browser)
+        {
+            e.Handled = true;
+            _ = browser.NavigateAsync(e.Key == Key.Left ? -1 : 1);
+        }
         else if ((e.Key is Key.Left or Key.Right) && (Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift) &&
                  Keyboard.FocusedElement is not (TextBoxBase or ComboBox or Slider or MenuItem) &&
                  _selected?.Session is { Ready: true, Error: null } session)
@@ -415,6 +516,9 @@ public partial class MainWindow : Window
         if (_closed) return;
         e.Cancel = true; if (_closing) return;
         _closing = true; _layoutCancellation?.Cancel(); _timer.Stop(); IsEnabled = false;
+        _audioDevices.Dispose();
+        _audioRecoveryCancellation?.Cancel();
+        await _audioRecoveryTask;
         await _mutation.WaitAsync();
         foreach (var tile in _tiles) await tile.ReleaseAsync();
         await Task.Run(() => _engine.Dispose());

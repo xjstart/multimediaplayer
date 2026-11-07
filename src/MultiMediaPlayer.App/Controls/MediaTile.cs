@@ -9,12 +9,13 @@ using MultiMediaPlayer.App.Media;
 using MultiMediaPlayer.Core;
 
 namespace MultiMediaPlayer.App.Controls;
-public sealed class MediaTile : Border
+public sealed partial class MediaTile : Border
 {
     public MediaItem Item { get; }
     public VlcSession? Session { get; private set; }
     public string? Error { get; private set; }
     public event Action<MediaTile>? Selected;
+    public event Action<MediaTile>? AudioStatusChanged;
     public event Action? MetadataChanged;
     public event Action<MediaTile>? RemoveRequested;
     public event Action<MediaTile>? RelocateRequested;
@@ -86,26 +87,26 @@ public sealed class MediaTile : Border
         Panel.SetZIndex(_dropPreview, 1);
         Grid.SetRow(_surface, 1); panel.Children.Add(header); panel.Children.Add(_surface); Child = panel;
         _surface.SizeChanged += (_, _) => Dispatcher.BeginInvoke(ResizeViewport, System.Windows.Threading.DispatcherPriority.Loaded);
+        if (item.Kind == MediaKind.Image) SetupImageBrowser();
     }
-    public async Task LoadAsync(LibVLC engine, bool paused)
+    public async Task LoadAsync(LibVLC engine, bool paused, bool audioOutputAvailable = true)
     {
         try
         {
-            if (!File.Exists(Item.Path)) throw new FileNotFoundException("找不到文件，请重新定位。");
             if (Item.Kind == MediaKind.Image)
             {
-                var loaded = await Task.Run(() => ImageLoader.Load(Item.Path));
+                bool loaded = await Browser!.InitializeAsync();
                 if (_released) return;
-                Item.DisplayAspect = loaded.Aspect;
-                _image = new Image { Source = loaded.Bitmap, Stretch = Stretch.Fill };
-                _imageLayer.Children.Add(_image);
-                _surface.Children.Add(_imageLayer);
-                ResizeViewport();
-                MetadataChanged?.Invoke();
+                _imageLoadFinished = true;
+                if (!loaded) ShowError(Browser.Errors.GetValueOrDefault(Item.Path) ?? "找不到文件，请重新定位。");
+                else MetadataChanged?.Invoke();
+                UpdateImageNavigation();
             }
             else
             {
+                if (!File.Exists(Item.Path)) throw new FileNotFoundException("找不到文件，请重新定位。");
                 Session = new(engine, Item);
+                Session.SetAudioOutputAvailable(audioOutputAvailable);
                 var input = _videoInput = new Grid { Background = new SolidColorBrush(Color.FromArgb(2, 0, 0, 0)), AllowDrop = true, Focusable = true };
                 WireSurfaceInput(input);
                 input.PreviewKeyDown += (_, e) => VideoKeyDown?.Invoke(input, e);
@@ -122,7 +123,9 @@ public sealed class MediaTile : Border
                 });
                 Session.Changed += () => Dispatcher.BeginInvoke(() =>
                 {
-                    if (!_released && Session?.Error is string error) ShowError(error);
+                    if (_released) return;
+                    if (Session?.Error is string error) ShowError(error);
+                    AudioStatusChanged?.Invoke(this);
                 });
                 // Give the VideoView a chance to attach its native output handle.
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Loaded);
@@ -139,8 +142,9 @@ public sealed class MediaTile : Border
     {
         IsSelected = selected;
         BorderBrush = Brush(selected ? "#72C7F0" : "#2A3445");
-        _badge.Text = selected ? (Item.Kind == MediaKind.Video ? "● 当前声音" : "● 已选中") : Item.Kind == MediaKind.Image ? "图片" : "视频";
+        _badge.Text = selected ? (Item.Kind == MediaKind.Video ? "● 声音目标" : "● 已选中") : Item.Kind == MediaKind.Image ? "图片" : "视频";
         _badge.Foreground = Brush(selected ? "#81D6FF" : "#8D9BB1");
+        UpdateImageNavigation();
     }
     private ContextMenu CreateMoveMenu(Func<IEnumerable<MediaItem>> moveTargets)
     {
@@ -233,6 +237,7 @@ public sealed class MediaTile : Border
     {
         input.MouseLeftButtonDown += (_, e) =>
         {
+            if (IsInteractiveInput(e.OriginalSource as DependencyObject)) return;
             SelectFromInput(input == _videoInput ? input : this);
             if (!CanZoom || Item.Zoom <= 1 || (_geometry.OverflowX <= 0 && _geometry.OverflowY <= 0)) return;
             if (input.CaptureMouse())
@@ -314,10 +319,12 @@ public sealed class MediaTile : Border
         stack.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Foreground = Brush("#A6B3C8"), Margin = new(0, 12, 0, 12), TextAlignment = TextAlignment.Center });
         var button = new Button { Content = "重新定位文件…" }; button.Click += (_, _) => RelocateRequested?.Invoke(this);
         stack.Children.Add(button); _surface.Children.Add(stack);
+        AttachImageNavigation();
     }
     public async Task ReleaseAsync()
     {
         _released = true;
+        Browser?.Dispose();
         if (_surface.IsMouseCaptured) _surface.ReleaseMouseCapture();
         if (_videoInput?.IsMouseCaptured == true) _videoInput.ReleaseMouseCapture();
         if (Session != null) await Task.Run(async () => await Session.DisposeAsync());
